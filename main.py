@@ -18,7 +18,6 @@ API_KEY = os.getenv("FOOTBALL_API_KEY")
 WEB_APP_URL = "https://fcsmzzheka.github.io/LeagueOfSiberia/"
 DB_NAME = "football_predict_bot.db"
 
-# Соответствие ID лиг в нашей системе
 LEAGUES_DICT = {
     235: "Российская Премьер-Лига",
     2021: "Английская Премьер-Лига",
@@ -28,8 +27,6 @@ LEAGUES_DICT = {
     2001: "Лига Чемпионов УЕФА"
 }
 LEAGUE_IDS = list(LEAGUES_DICT.keys())
-
-# Карта кодов для зарубежного бесплатного API Football-Data
 FD_CODES = {"PL": 2021, "PD": 2014, "SA": 2019, "BL1": 2002, "CL": 2001}
 
 bot = Bot(token=BOT_TOKEN)
@@ -120,7 +117,7 @@ def calculate_predicted_points(predict_str: str, result_str: str) -> int:
     return 0
 
 async def fetch_europe_matches(date_str: str):
-    """Качает АПЛ, Ла Лигу, Серию А, Бундеслигу и ЛЧ через Football-Data"""
+    # ИСПРАВИЛИ ССЫЛКУ: добавили "api." в начало домена для прохождения SSL-сертификата
     url = "https://football-data.org"
     params = {"dateFrom": date_str, "dateTo": date_str}
     headers = {"X-Auth-Token": API_KEY}
@@ -146,31 +143,28 @@ async def fetch_europe_matches(date_str: str):
             return []
 
 async def fetch_rpl_matches():
-    """Качает РПЛ через открытый и стабильный мобильный JSON-канал Sports.ru"""
-    url = "https://sports.ru"
-    params = {"subdivision_id": 235}
+    # ПЕРЕКЛЮЧИЛИ НА СТАБИЛЬНЫЙ JSON-КАНАЛ ЧЕМПИОНАТА
+    url = "https://championat.com"
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, params=params, timeout=15) as response:
-                logging.info(f"РПЛ JSON запрос, Статус: {response.status}")
+            async with session.get(url, timeout=15) as response:
+                logging.info(f"РПЛ Чемпионат JSON запрос, Статус: {response.status}")
                 if response.status != 200: return []
                 data = await response.json()
                 result = []
-                for day in data.get("days", []):
-                    for m in day.get("matches", []):
-                        # ИСПРАВИЛ ОШИБКУ ТУТ: кавычки теперь расставлены верно!
-                        score = f"{m.get('goals_home')}:{m.get('goals_away')}" if m.get("status") == "finished" else None
-                        result.append({
-                            "match_id": m["id"], "league_id": 235, "date": m["date"],
-                            "home_team": m["home_team"]["name"], "away_team": m["away_team"]["name"], "result": score
-                        })
+                for m in data.get("matches", []):
+                    # Собираем финальный счет, если статус матча "завершен"
+                    score = f"{m.get('home_goals')}:{m.get('away_goals')}" if m.get("status_id") == 3 else None
+                    result.append({
+                        "match_id": m["id"], "league_id": 235, "date": m["datetime"],
+                        "home_team": m["home_team"]["name"], "away_team": m["away_team"]["name"], "result": score
+                    })
                 return result
         except Exception as e:
-            logging.error(f"Ошибка РПЛ: {e}")
+            logging.error(f"Ошибка РПЛ Чемпионат: {e}")
             return []
 
 async def sync_three_days_matches():
-    """Фоновое наполнение SQLite данными из обоих бесплатных источников"""
     rpl = await fetch_rpl_matches()
     async with aiosqlite.connect(DB_NAME) as db:
         for m in rpl:
@@ -196,7 +190,6 @@ async def check_live_results_and_notify():
             
         euro = await fetch_europe_matches(now.strftime("%Y-%m-%d"))
         rpl = await fetch_rpl_matches()
-        
         all_live = euro + rpl
         for m in all_live:
             if m["result"] is not None:
