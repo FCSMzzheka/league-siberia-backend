@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАСТРОЙКИ СИСТЕМЫ ---
 BOT_TOKEN = "8076069178:AAEXQCMwSJEswUlsL44AHndok5hZ58XEmtQ"
-WEB_APP_URL = "https://github.io"
+WEB_APP_URL = "https://fcsmzzheka.github.io/LeagueOfSiberia/"
 API_KEY = "feb9b5e694287da782e4d92deee40c20"
 DB_NAME = "football_predict_bot.db"
 
@@ -75,7 +75,7 @@ async def cmd_start(message: types.Message):
     )
     
     text = (
-        "📊 *АНАЛИТИЧЕСКАЯ СИСТЕМА ПРОГНОЗИРОВАНИЯ*\n\n"
+        "📊 *КОНКУРС ПРОГНОЗОВ*\n\n"
         f"Учетная запись *@{escape_md(username)}* успешно активирована\.\n\n"
         "Используйте кнопку ниже, чтобы открыть графический интерфейс, "
         "выставить прогнозы на матчи РПЛ и мировых лиг, а также проверить турнирные таблицы лидеров:"
