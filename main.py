@@ -15,7 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # --- НАСТРОЙКИ СИСТЕМЫ ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_KEY = os.getenv("FOOTBALL_API_KEY")
-WEB_APP_URL = "https://github.io"
+WEB_APP_URL = "https://fcsmzzheka.github.io/LeagueOfSiberia/"
 DB_NAME = "football_predict_bot.db"
 
 # Соответствие ID лиг в нашей системе
