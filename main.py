@@ -14,7 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # --- НАСТРОЙКИ СИСТЕМЫ ---
 BOT_TOKEN = "8076069178:AAEXQCMwSJEswUlsL44AHndok5hZ58XEmtQ"
 WEB_APP_URL = "https://fcsmzzheka.github.io/LeagueOfSiberia/"
-API_KEY = "feb9b5e694287da782e4d92deee40c20"
+API_KEY = "781a30bef191ab8bae9e0934774f590e"
 DB_NAME = "football_predict_bot.db"
 
 LEAGUES_DICT = {
