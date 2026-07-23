@@ -189,11 +189,16 @@ async def check_live_results_and_notify():
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
+    
     scheduler.add_job(sync_three_days_matches, 'cron', hour=6, minute=0)
     scheduler.add_job(sync_three_days_matches, 'cron', hour=14, minute=0)
     scheduler.add_job(check_live_results_and_notify, 'interval', minutes=30)
     scheduler.start()
-    await sync_three_days_matches()
+    
+    # Запускаем фоном, чтобы бот не отключался из-за лимитов API
+    asyncio.create_task(sync_three_days_matches())
+    
+    # Включаем самого бота в Telegram
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
