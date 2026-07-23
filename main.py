@@ -4,9 +4,10 @@ import json
 import re
 import urllib.parse
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import aiohttp
 import aiosqlite
+import cloudscraper  # Подключаем инструмент обхода защиты сайтов
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -14,7 +15,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАСТРОЙКИ СИСТЕМЫ ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-API_KEY = os.getenv("FOOTBALL_API_KEY")
 WEB_APP_URL = "https://fcsmzzheka.github.io/LeagueOfSiberia/"
 DB_NAME = "football_predict_bot.db"
 
@@ -82,7 +82,7 @@ async def cmd_start(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=final_url))
     text = (
-        "<b>📊 АНАЛИТИЧЕСКАЯ СИСТЕМА ПРОГНОЗИРОВАНИЯ</b>\n\n"
+        "<b>📊 КОНКУРС ПРОГНОЗОВ</b>\n\n"
         f"Учетная запись <b>@{username}</b> успешно активирована.\n\n"
         "Нажмите на кнопку ниже, чтобы открыть графический интерфейс матчей и таблиц:"
     )
@@ -115,63 +115,78 @@ def calculate_predicted_points(predict_str: str, result_str: str) -> int:
     if ((p_home - p_away) > 0 and (r_home - r_away) > 0) or ((p_home - p_away) < 0 and (r_home - r_away) < 0): return 2
     return 0
 
-async def fetch_matches_from_api(date_str: str):
-    # Используем открытое CORS-прокси зеркало для обхода блокировок Cloudflare хостинга Amvera
-    url = f"https://allorigins.win{urllib.parse.quote(f'https://api-sports.io{date_str}')}"
-    headers = {
-        "x-apisports-key": API_KEY,
-        "x-rapidapi-host": "v3.football.api-sports.io"
-    }
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, timeout=20) as response:
-                logging.info(f"Запрос API через прокси на дату {date_str}. Статус: {response.status}")
-                if response.status != 200: return []
+def fetch_games_via_scraper():
+    """Бронебойный автоматический сбор расписания РПЛ и Европы в обход любых блокировок сайтов"""
+    scraper = cloudscraper.create_scraper()
+    # Стучимся на открытый спортивный новостной хаб, защищенный Cloudflare
+    url = "https://sports.ru"
+    
+    try:
+        response = scraper.get(url, timeout=15)
+        logging.info(f"Запрос к спортивному серверу. Статус: {response.status_code}")
+        if response.status_code != 200: return []
+        
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Находим блоки всех футбольных матчей на ближайшие дни
+        match_cards = soup.find_all('div', class_='match-teaser')
+        result_matches = []
+        
+        # Карта лиг для распределения по вкладкам
+        league_keywords = {
+            "Россия": 235, "Англия": 39, "Испания": 140, "Италия": 135, "Германия": 78, "Лига чемпионов": 2
+        }
+        
+        for card in match_cards:
+            try:
+                league_text = card.find('div', class_='tournament').get_text(strip=True)
+                l_id = None
+                for key, val in league_keywords.items():
+                    if key in league_text:
+                        l_id = val
+                        break
                 
-                wrapper_data = await response.json()
-                # Прокси возвращает ответ в поле contents в виде строки, декодируем её
-                data = json.loads(wrapper_data["contents"])
-                
-                if data.get("errors"):
-                    logging.error(f"Ошибка API-Football: {data.get('errors')}")
-                    return []
+                if l_id:
+                    home = card.find('div', class_='team-home').get_text(strip=True)
+                    away = card.find('div', class_='team-away').get_text(strip=True)
+                    m_time = card.find('div', class_='match-time').get_text(strip=True)
                     
-                all_fixtures = data.get("response", [])
-                filtered_matches = []
-                for item in all_fixtures:
-                    l_id = item["league"]["id"]
-                    if l_id in LEAGUE_IDS:
-                        status = item["fixture"]["status"]["short"]
-                        score = f"{item['goals']['home']}:{item['goals']['away']}" if status in ["FT", "AET", "PEN"] else None
-                        filtered_matches.append({
-                            "match_id": item["fixture"]["id"], "league_id": l_id, "date": item["fixture"]["date"],
-                            "home_team": item["teams"]["home"]["name"], "away_team": item["teams"]["away"]["name"], "result": score
-                        })
-                logging.info(f"Успешно обработано матчей на {date_str}: {len(filtered_matches)}")
-                return filtered_matches
-        except Exception as e:
-            logging.error(f"Ошибка сети API через прокси: {e}")
-            return []
+                    # Проверяем результат, если матч сыгран
+                    score_element = card.find('div', class_='match-score')
+                    score = score_element.get_text(strip=True).replace(" ", "") if score_element else None
+                    if score and ":" not in score: score = None
+                    
+                    m_id = abs(hash(home + away + m_time)) % 1000000
+                    result_matches.append({
+                        "match_id": m_id, "league_id": l_id, "date": m_time, "home_team": home, "away_team": away, "result": score
+                    })
+            except: continue
+        return result_matches
+    except Exception as e:
+        logging.error(f"Ошибка автоматического сбора данных: {e}")
+        return []
 
-async def sync_today_matches():
-    """Скачивает матчи РПЛ и Европы строго на текущие сутки (доступно во Free тарифе)"""
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    matches = await fetch_matches_from_api(today_str)
+async def sync_three_days_matches():
+    # Запускаем синхронизацию через встроенный пул, так как cloudscraper работает синхронно
+    loop = asyncio.get_event_loop()
+    matches = await loop.run_in_executor(None, fetch_games_via_scraper)
     if matches:
         async with aiosqlite.connect(DB_NAME) as db:
             for m in matches:
                 await db.execute('INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"]))
             await db.commit()
-            logging.info("Синхронизация SQLite с интернетом завершена!")
+        logging.info(f"Автоматика сработала. База SQLite наполнилась матчами: {len(matches)}")
 
 async def check_live_results_and_notify():
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT match_id FROM matches WHERE result IS NULL") as cursor:
             if not await cursor.fetchall(): return
         
-        api_matches = await fetch_matches_from_api(today_str)
-        for m in api_matches:
+        loop = asyncio.get_event_loop()
+        web_matches = await loop.run_in_executor(None, fetch_games_via_scraper)
+        
+        for m in web_matches:
             if m["result"] is not None:
                 async with db.execute("SELECT finished_notified, league_id FROM matches WHERE match_id = ?", (m["match_id"],)) as res_cur:
                     row = await res_cur.fetchone()
@@ -192,11 +207,11 @@ async def check_live_results_and_notify():
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
-    scheduler.add_job(sync_today_matches, 'cron', hour=6, minute=0)
-    scheduler.add_job(sync_today_matches, 'cron', hour=14, minute=0)
+    scheduler.add_job(sync_three_days_matches, 'cron', hour=6, minute=0)
+    scheduler.add_job(sync_three_days_matches, 'cron', hour=14, minute=0)
     scheduler.add_job(check_live_results_and_notify, 'interval', minutes=30)
     scheduler.start()
-    asyncio.create_task(sync_today_matches())
+    asyncio.create_task(sync_three_days_matches())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
