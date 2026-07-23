@@ -3,6 +3,7 @@ import logging
 import json
 import re
 import urllib.parse
+import os
 from datetime import datetime, timedelta, timezone
 import aiohttp
 import aiosqlite
@@ -12,20 +13,24 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАСТРОЙКИ СИСТЕМЫ ---
-BOT_TOKEN = "8076069178:AAEXQCMwSJEswUlsL44AHndok5hZ58XEmtQ"
-WEB_APP_URL = "https://fcsmzzheka.github.io/LeagueOfSiberia/"
-API_KEY = "781a30bef191ab8bae9e0934774f590e"
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+API_KEY = os.getenv("FOOTBALL_API_KEY")
+WEB_APP_URL = "https://github.io"
 DB_NAME = "football_predict_bot.db"
 
+# Соответствие ID лиг в нашей системе
 LEAGUES_DICT = {
     235: "Российская Премьер-Лига",
-    39: "Английская Премьер-Лига",
-    140: "Ла Лига (Испания)",
-    135: "Серия А (Италия)",
-    78: "Бундеслига (Германия)",
-    2: "Лига Чемпионов УЕФА"
+    2021: "Английская Премьер-Лига",
+    2014: "Ла Лига (Испания)",
+    2019: "Серия А (Италия)",
+    2002: "Бундеслига (Германия)",
+    2001: "Лига Чемпионов УЕФА"
 }
 LEAGUE_IDS = list(LEAGUES_DICT.keys())
+
+# Карта кодов для зарубежного бесплатного API Football-Data
+FD_CODES = {"PL": 2021, "PD": 2014, "SA": 2019, "BL1": 2002, "CL": 2001}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -76,10 +81,8 @@ async def cmd_start(message: types.Message):
             leaders_dict[l_id].append({"username": u_name, "points": pts})
 
     init_data = {"matches": matches_list, "leaderboards": leaders_dict, "leagues": LEAGUES_DICT}
-    # ИСПОЛЬЗУЕМ СТАНДАРТНЫЙ URLENCODE ИЗ PYTHON
     encoded_data = urllib.parse.urlencode({"data": json.dumps(init_data)})
     final_url = f"{WEB_APP_URL}?{encoded_data}"
-    
     builder = InlineKeyboardBuilder()
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=final_url))
     text = (
@@ -89,7 +92,6 @@ async def cmd_start(message: types.Message):
     )
     await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-# --- ПРИЕМ ПРОГНОЗОВ ИЗ WEB APP ИНТЕРФЕЙСА ---
 @dp.message(F.content_type == types.ContentType.WEB_APP_DATA)
 async def process_web_app_data(message: types.Message):
     try:
@@ -117,67 +119,86 @@ def calculate_predicted_points(predict_str: str, result_str: str) -> int:
     if ((p_home - p_away) > 0 and (r_home - r_away) > 0) or ((p_home - p_away) < 0 and (r_home - r_away) < 0): return 2
     return 0
 
-async def fetch_matches_from_api(date_str: str):
-    # Строго зафиксированный адрес без возможности склеивания
-    url = "https://api-sports.io"
-    params = {"date": date_str}
-    headers = {
-        "x-apisports-key": API_KEY,
-        "x-rapidapi-host": "v3.football.api-sports.io"
-    }
+async def fetch_europe_matches(date_str: str):
+    """Качает АПЛ, Ла Лигу, Серию А, Бундеслигу и ЛЧ через Football-Data"""
+    url = "https://football-data.org"
+    params = {"dateFrom": date_str, "dateTo": date_str}
+    headers = {"X-Auth-Token": API_KEY}
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, params=params, timeout=15) as response:
-                logging.info(f"Запрос API к Football. Дата: {date_str}. Статус: {response.status}")
-                if response.status != 200: 
-                    return []
+                logging.info(f"Европа API запрос на дату {date_str}, Статус: {response.status}")
+                if response.status != 200: return []
                 data = await response.json()
-                if data.get("errors"):
-                    logging.error(f"Ошибка самого API-Football: {data.get('errors')}")
-                    return []
-                all_fixtures = data.get("response", [])
-                filtered_matches = []
-                for item in all_fixtures:
-                    l_id = item["league"]["id"]
-                    if l_id in LEAGUE_IDS:
-                        status = item["fixture"]["status"]["short"]
-                        score = f"{item['goals']['home']}:{item['goals']['away']}" if status in ["FT", "AET", "PEN"] else None
-                        filtered_matches.append({
-                            "match_id": item["fixture"]["id"], "league_id": l_id, "date": item["fixture"]["date"],
-                            "home_team": item["teams"]["home"]["name"], "away_team": item["teams"]["away"]["name"], "result": score
+                matches = data.get("matches", [])
+                result = []
+                for m in matches:
+                    code = m["competition"]["code"]
+                    if code in FD_CODES:
+                        score = f"{m['score']['fullTime']['home']}:{m['score']['fullTime']['away']}" if m["status"] == "FINISHED" else None
+                        result.append({
+                            "match_id": m["id"], "league_id": FD_CODES[code], "date": m["utcDate"],
+                            "home_team": m["homeTeam"]["name"], "away_team": m["awayTeam"]["name"], "result": score
                         })
-                return filtered_matches
-        except Exception as e:
-            logging.error(f"Критическая ошибка сети при запросе API: {e}")
-            return []
+                return result
+        except: return []
+
+async def fetch_rpl_matches():
+    """Качает РПЛ через открытый и стабильный мобильный JSON-канал Sports.ru"""
+    url = "https://sports.ru"
+    params = {"subdivision_id": 235} # 235 — ID РПЛ в системе Sports.ru
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params, timeout=15) as response:
+                logging.info(f"РПЛ JSON запрос, Статус: {response.status}")
+                if response.status != 200: return []
+                data = await response.json()
+                result = []
+                # Ищем матчи в структуре JSON
+                for day in data.get("days", []):
+                    for m in day.get("matches", []):
+                        score = f"{m.get('goals_home')}:{m.get('goals('away')')}" if m.get("status") == "finished" else None
+                        result.append({
+                            "match_id": m["id"], "league_id": 235, "date": m["date"],
+                            "home_team": m["home_team"]["name"], "away_team": m["away_team"]["name"], "result": score
+                        })
+                return result
+        except: return []
 
 async def sync_three_days_matches():
-    """Скачивает матчи, адаптируя запросы под лимиты бесплатного тарифа API"""
-    # Вместо заблокированного года берем стабильный текущий день футбольного календаря
-    now = datetime.now(timezone.utc)
+    """Фоновое наполнение SQLite данными из обоих бесплатных источников"""
+    # 1. Забираем РПЛ
+    rpl = await fetch_rpl_matches()
+    async with aiosqlite.connect(DB_NAME) as db:
+        for m in rpl:
+            await db.execute('INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"]))
+        await db.commit()
     
+    # 2. Забираем Европу на 3 дня вперед
+    now = datetime.now(timezone.utc)
     for i in range(3):
-        # Запрашиваем сегодняшний, завтрашний и послезавтрашний день текущего сезона
         date_str = (now + timedelta(days=i)).strftime("%Y-%m-%d")
-        matches = await fetch_matches_from_api(date_str)
-        
-        if matches:
+        euro = await fetch_europe_matches(date_str)
+        if euro:
             async with aiosqlite.connect(DB_NAME) as db:
-                for m in matches:
-                    # Подменяем дату в нашей локальной базе данных на актуальную для турнира
-                    await db.execute(
-                        'INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', 
-                        (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"])
-                    )
+                for m in euro:
+                    await db.execute('INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"]))
                 await db.commit()
+    logging.info("Синхронизация базы РПЛ + Европа успешно завершена!")
 
 async def check_live_results_and_notify():
     now = datetime.now(timezone.utc)
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT match_id FROM matches WHERE result IS NULL") as cursor:
             if not await cursor.fetchall(): return
-        api_matches = await fetch_matches_from_api(now.strftime("%Y-%m-%d"))
-        for m in api_matches:
+            
+        # Обновляем Европу
+        euro = await fetch_europe_matches(now.strftime("%Y-%m-%d"))
+        # Обновляем РПЛ
+        rpl = await fetch_rpl_matches()
+        
+        all_live = euro + rpl
+        for m in all_live:
             if m["result"] is not None:
                 async with db.execute("SELECT finished_notified, league_id FROM matches WHERE match_id = ?", (m["match_id"],)) as res_cur:
                     row = await res_cur.fetchone()
@@ -198,16 +219,11 @@ async def check_live_results_and_notify():
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
-    
     scheduler.add_job(sync_three_days_matches, 'cron', hour=6, minute=0)
     scheduler.add_job(sync_three_days_matches, 'cron', hour=14, minute=0)
     scheduler.add_job(check_live_results_and_notify, 'interval', minutes=30)
     scheduler.start()
-    
-    # Запускаем фоном, чтобы бот не отключался из-за лимитов API
     asyncio.create_task(sync_three_days_matches())
-    
-    # Включаем самого бота в Telegram
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
