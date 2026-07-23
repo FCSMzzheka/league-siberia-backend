@@ -1,0 +1,5 @@
+meta:
+  environment: python
+  toolchain: pip
+run:
+  command: python main.py
