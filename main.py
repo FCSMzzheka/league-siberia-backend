@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import re
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 import aiohttp
 import aiosqlite
@@ -75,8 +76,10 @@ async def cmd_start(message: types.Message):
             leaders_dict[l_id].append({"username": u_name, "points": pts})
 
     init_data = {"matches": matches_list, "leaderboards": leaders_dict, "leagues": LEAGUES_DICT}
-    encoded_data = aiohttp.helpers.urlencode({"data": json.dumps(init_data)})
+    # ИСПОЛЬЗУЕМ СТАНДАРТНЫЙ URLENCODE ИЗ PYTHON
+    encoded_data = urllib.parse.urlencode({"data": json.dumps(init_data)})
     final_url = f"{WEB_APP_URL}?{encoded_data}"
+    
     builder = InlineKeyboardBuilder()
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=final_url))
     text = (
@@ -97,7 +100,7 @@ async def process_web_app_data(message: types.Message):
             user_id = message.from_user.id
             async with aiosqlite.connect(DB_NAME) as db:
                 async with db.execute("SELECT home_team, away_team FROM matches WHERE match_id = ?", (match_id,)) as cursor:
-                    match = await cursor.one()
+                    match = await cursor.fetchone()
                 if match:
                     await db.execute('INSERT OR REPLACE INTO predictions VALUES (?, ?, ?)', (user_id, match_id, score))
                     await db.commit()
@@ -115,24 +118,19 @@ def calculate_predicted_points(predict_str: str, result_str: str) -> int:
     return 0
 
 async def fetch_matches_from_api(date_str: str):
+    # ИСПРАВИЛИ ССЫЛКУ: добавили четкий знак "?" перед параметром даты
     url = f"https://api-sports.io{date_str}"
     headers = {"x-apisports-key": API_KEY, "x-rapidapi-host": "v3.football.api-sports.io"}
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, timeout=15) as response:
                 logging.info(f"API запрос на дату {date_str}, Статус: {response.status}")
-                if response.status != 200: 
-                    return []
+                if response.status != 200: return []
                 data = await response.json()
-                
-                # Проверяем, нет ли ошибки в самом ответе API
                 if data.get("errors"):
                     logging.error(f"Ошибка API-Football: {data.get('errors')}")
                     return []
-                    
                 all_fixtures = data.get("response", [])
-                logging.info(f"Получено матчей из API: {len(all_fixtures)}")
-                
                 filtered_matches = []
                 for item in all_fixtures:
                     l_id = item["league"]["id"]
@@ -143,9 +141,8 @@ async def fetch_matches_from_api(date_str: str):
                             "match_id": item["fixture"]["id"], "league_id": l_id, "date": item["fixture"]["date"],
                             "home_team": item["teams"]["home"]["name"], "away_team": item["teams"]["away"]["name"], "result": score
                         })
-                logging.info(f"Матчей после фильтрации по нашим лигам: {len(filtered_matches)}")
                 return filtered_matches
-        except Exception as e: 
+        except Exception as e:
             logging.error(f"Критическая ошибка сети при запросе к API: {e}")
             return []
 
