@@ -4,7 +4,7 @@ import json
 import re
 import urllib.parse
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import aiohttp
 import aiosqlite
 from aiogram import Bot, Dispatcher, types, F
@@ -20,14 +20,13 @@ DB_NAME = "football_predict_bot.db"
 
 LEAGUES_DICT = {
     235: "Российская Премьер-Лига",
-    2021: "Английская Премьер-Лига",
-    2014: "Ла Лига (Испания)",
-    2019: "Серия А (Италия)",
-    2002: "Бундеслига (Германия)",
-    2001: "Лига Чемпионов УЕФА"
+    39: "Английская Премьер-Лига",
+    140: "Ла Лига (Испания)",
+    135: "Серия А (Италия)",
+    78: "Бундеслига (Германия)",
+    2: "Лига Чемпионов УЕФА"
 }
 LEAGUE_IDS = list(LEAGUES_DICT.keys())
-FD_CODES = {"PL": 2021, "PD": 2014, "SA": 2019, "BL1": 2002, "CL": 2001}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -83,7 +82,7 @@ async def cmd_start(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=final_url))
     text = (
-        "<b>📊 КОНКУРС ПРОГНОЗОВ</b>\n\n"
+        "<b>📊 АНАЛИТИЧЕСКАЯ СИСТЕМА ПРОГНОЗИРОВАНИЯ</b>\n\n"
         f"Учетная запись <b>@{username}</b> успешно активирована.\n\n"
         "Нажмите на кнопку ниже, чтобы открыть графический интерфейс матчей и таблиц:"
     )
@@ -116,82 +115,63 @@ def calculate_predicted_points(predict_str: str, result_str: str) -> int:
     if ((p_home - p_away) > 0 and (r_home - r_away) > 0) or ((p_home - p_away) < 0 and (r_home - r_away) < 0): return 2
     return 0
 
-async def fetch_europe_matches(date_str: str):
-    # ИСПРАВИЛИ ССЫЛКУ: добавили "api." в начало домена для прохождения SSL-сертификата
-    url = "https://football-data.org"
-    params = {"dateFrom": date_str, "dateTo": date_str}
-    headers = {"X-Auth-Token": API_KEY}
+async def fetch_matches_from_api(date_str: str):
+    # Используем открытое CORS-прокси зеркало для обхода блокировок Cloudflare хостинга Amvera
+    url = f"https://allorigins.win{urllib.parse.quote(f'https://api-sports.io{date_str}')}"
+    headers = {
+        "x-apisports-key": API_KEY,
+        "x-rapidapi-host": "v3.football.api-sports.io"
+    }
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, headers=headers, params=params, timeout=15) as response:
-                logging.info(f"Европа API запрос на дату {date_str}, Статус: {response.status}")
+            async with session.get(url, headers=headers, timeout=20) as response:
+                logging.info(f"Запрос API через прокси на дату {date_str}. Статус: {response.status}")
                 if response.status != 200: return []
-                data = await response.json()
-                matches = data.get("matches", [])
-                result = []
-                for m in matches:
-                    code = m["competition"]["code"]
-                    if code in FD_CODES:
-                        score = f"{m['score']['fullTime']['home']}:{m['score']['fullTime']['away']}" if m["status"] == "FINISHED" else None
-                        result.append({
-                            "match_id": m["id"], "league_id": FD_CODES[code], "date": m["utcDate"],
-                            "home_team": m["homeTeam"]["name"], "away_team": m["awayTeam"]["name"], "result": score
+                
+                wrapper_data = await response.json()
+                # Прокси возвращает ответ в поле contents в виде строки, декодируем её
+                data = json.loads(wrapper_data["contents"])
+                
+                if data.get("errors"):
+                    logging.error(f"Ошибка API-Football: {data.get('errors')}")
+                    return []
+                    
+                all_fixtures = data.get("response", [])
+                filtered_matches = []
+                for item in all_fixtures:
+                    l_id = item["league"]["id"]
+                    if l_id in LEAGUE_IDS:
+                        status = item["fixture"]["status"]["short"]
+                        score = f"{item['goals']['home']}:{item['goals']['away']}" if status in ["FT", "AET", "PEN"] else None
+                        filtered_matches.append({
+                            "match_id": item["fixture"]["id"], "league_id": l_id, "date": item["fixture"]["date"],
+                            "home_team": item["teams"]["home"]["name"], "away_team": item["teams"]["away"]["name"], "result": score
                         })
-                return result
+                logging.info(f"Успешно обработано матчей на {date_str}: {len(filtered_matches)}")
+                return filtered_matches
         except Exception as e:
-            logging.error(f"Ошибка Европы: {e}")
+            logging.error(f"Ошибка сети API через прокси: {e}")
             return []
 
-async def fetch_rpl_matches():
-    # ПЕРЕКЛЮЧИЛИ НА СТАБИЛЬНЫЙ JSON-КАНАЛ ЧЕМПИОНАТА
-    url = "https://championat.com"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, timeout=15) as response:
-                logging.info(f"РПЛ Чемпионат JSON запрос, Статус: {response.status}")
-                if response.status != 200: return []
-                data = await response.json()
-                result = []
-                for m in data.get("matches", []):
-                    # Собираем финальный счет, если статус матча "завершен"
-                    score = f"{m.get('home_goals')}:{m.get('away_goals')}" if m.get("status_id") == 3 else None
-                    result.append({
-                        "match_id": m["id"], "league_id": 235, "date": m["datetime"],
-                        "home_team": m["home_team"]["name"], "away_team": m["away_team"]["name"], "result": score
-                    })
-                return result
-        except Exception as e:
-            logging.error(f"Ошибка РПЛ Чемпионат: {e}")
-            return []
-
-async def sync_three_days_matches():
-    rpl = await fetch_rpl_matches()
-    async with aiosqlite.connect(DB_NAME) as db:
-        for m in rpl:
-            await db.execute('INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"]))
-        await db.commit()
-    
-    now = datetime.now(timezone.utc)
-    for i in range(3):
-        date_str = (now + timedelta(days=i)).strftime("%Y-%m-%d")
-        euro = await fetch_europe_matches(date_str)
-        if euro:
-            async with aiosqlite.connect(DB_NAME) as db:
-                for m in euro:
-                    await db.execute('INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"]))
-                await db.commit()
-    logging.info("Синхронизация базы РПЛ + Европа успешно завершена!")
+async def sync_today_matches():
+    """Скачивает матчи РПЛ и Европы строго на текущие сутки (доступно во Free тарифе)"""
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    matches = await fetch_matches_from_api(today_str)
+    if matches:
+        async with aiosqlite.connect(DB_NAME) as db:
+            for m in matches:
+                await db.execute('INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"]))
+            await db.commit()
+            logging.info("Синхронизация SQLite с интернетом завершена!")
 
 async def check_live_results_and_notify():
-    now = datetime.now(timezone.utc)
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT match_id FROM matches WHERE result IS NULL") as cursor:
             if not await cursor.fetchall(): return
-            
-        euro = await fetch_europe_matches(now.strftime("%Y-%m-%d"))
-        rpl = await fetch_rpl_matches()
-        all_live = euro + rpl
-        for m in all_live:
+        
+        api_matches = await fetch_matches_from_api(today_str)
+        for m in api_matches:
             if m["result"] is not None:
                 async with db.execute("SELECT finished_notified, league_id FROM matches WHERE match_id = ?", (m["match_id"],)) as res_cur:
                     row = await res_cur.fetchone()
@@ -212,11 +192,11 @@ async def check_live_results_and_notify():
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
-    scheduler.add_job(sync_three_days_matches, 'cron', hour=6, minute=0)
-    scheduler.add_job(sync_three_days_matches, 'cron', hour=14, minute=0)
+    scheduler.add_job(sync_today_matches, 'cron', hour=6, minute=0)
+    scheduler.add_job(sync_today_matches, 'cron', hour=14, minute=0)
     scheduler.add_job(check_live_results_and_notify, 'interval', minutes=30)
     scheduler.start()
-    asyncio.create_task(sync_three_days_matches())
+    asyncio.create_task(sync_today_matches())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
