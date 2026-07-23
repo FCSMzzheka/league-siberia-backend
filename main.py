@@ -74,13 +74,14 @@ async def cmd_start(message: types.Message):
         web_app=types.WebAppInfo(url=WEB_APP_URL)
     )
     
+    # Перевели на HTML формат, теперь никаких конфликтов символов не будет
     text = (
-        "📊 *КОНКУРС ПРОГНОЗОВ*\n\n"
-        f"Учетная запись *@{escape_md(username)}* успешно активирована\.\n\n"
+        "<b>📊 КОНКУРС ПРОГНОЗОВ</b>\n\n"
+        f"Учетная запись <b>@{username}</b> успешно активирована.\n\n"
         "Используйте кнопку ниже, чтобы открыть графический интерфейс, "
         "выставить прогнозы на матчи РПЛ и мировых лиг, а также проверить турнирные таблицы лидеров:"
     )
-    await message.answer(text, reply_markup=builder.as_markup(), parse_mode="MarkdownV2")
+    await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 # --- ПРИЕМ ПРОГНОЗОВ ИЗ WEB APP ИНТЕРФЕЙСА ---
 @dp.message(F.content_type == types.ContentType.WEB_APP_DATA)
