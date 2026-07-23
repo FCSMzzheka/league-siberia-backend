@@ -97,7 +97,7 @@ async def process_web_app_data(message: types.Message):
             user_id = message.from_user.id
             async with aiosqlite.connect(DB_NAME) as db:
                 async with db.execute("SELECT home_team, away_team FROM matches WHERE match_id = ?", (match_id,)) as cursor:
-                    match = await cursor.fetchone()
+                    match = await cursor.one()
                 if match:
                     await db.execute('INSERT OR REPLACE INTO predictions VALUES (?, ?, ?)', (user_id, match_id, score))
                     await db.commit()
@@ -120,9 +120,19 @@ async def fetch_matches_from_api(date_str: str):
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, timeout=15) as response:
-                if response.status != 200: return []
+                logging.info(f"API запрос на дату {date_str}, Статус: {response.status}")
+                if response.status != 200: 
+                    return []
                 data = await response.json()
+                
+                # Проверяем, нет ли ошибки в самом ответе API
+                if data.get("errors"):
+                    logging.error(f"Ошибка API-Football: {data.get('errors')}")
+                    return []
+                    
                 all_fixtures = data.get("response", [])
+                logging.info(f"Получено матчей из API: {len(all_fixtures)}")
+                
                 filtered_matches = []
                 for item in all_fixtures:
                     l_id = item["league"]["id"]
@@ -133,8 +143,11 @@ async def fetch_matches_from_api(date_str: str):
                             "match_id": item["fixture"]["id"], "league_id": l_id, "date": item["fixture"]["date"],
                             "home_team": item["teams"]["home"]["name"], "away_team": item["teams"]["away"]["name"], "result": score
                         })
+                logging.info(f"Матчей после фильтрации по нашим лигам: {len(filtered_matches)}")
                 return filtered_matches
-        except: return []
+        except Exception as e: 
+            logging.error(f"Критическая ошибка сети при запросе к API: {e}")
+            return []
 
 async def sync_three_days_matches():
     now = datetime.now(timezone.utc)
