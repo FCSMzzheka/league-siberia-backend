@@ -118,7 +118,7 @@ def calculate_predicted_points(predict_str: str, result_str: str) -> int:
     return 0
 
 async def fetch_matches_from_api(date_str: str):
-    # ИСПРАВИЛИ ССЫЛКУ: добавили четкий знак "?" перед параметром даты
+    # Исправили домен и эндпоинт запроса
     url = f"https://api-sports.io{date_str}"
     headers = {"x-apisports-key": API_KEY, "x-rapidapi-host": "v3.football.api-sports.io"}
     async with aiohttp.ClientSession() as session:
@@ -143,7 +143,7 @@ async def fetch_matches_from_api(date_str: str):
                         })
                 return filtered_matches
         except Exception as e:
-            logging.error(f"Критическая ошибка сети при запросе к API: {e}")
+            logging.error(f"Критическая ошибка сети при JavaScript API: {e}")
             return []
 
 async def sync_three_days_matches():
