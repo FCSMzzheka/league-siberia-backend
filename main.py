@@ -118,17 +118,22 @@ def calculate_predicted_points(predict_str: str, result_str: str) -> int:
     return 0
 
 async def fetch_matches_from_api(date_str: str):
-    # Исправили домен и эндпоинт запроса
-    url = f"https://api-sports.io{date_str}"
-    headers = {"x-apisports-key": API_KEY, "x-rapidapi-host": "v3.football.api-sports.io"}
+    # Строго зафиксированный адрес без возможности склеивания
+    url = "https://api-sports.io"
+    params = {"date": date_str}
+    headers = {
+        "x-apisports-key": API_KEY,
+        "x-rapidapi-host": "v3.football.api-sports.io"
+    }
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, headers=headers, timeout=15) as response:
-                logging.info(f"API запрос на дату {date_str}, Статус: {response.status}")
-                if response.status != 200: return []
+            async with session.get(url, headers=headers, params=params, timeout=15) as response:
+                logging.info(f"Запрос API к Football. Дата: {date_str}. Статус: {response.status}")
+                if response.status != 200: 
+                    return []
                 data = await response.json()
                 if data.get("errors"):
-                    logging.error(f"Ошибка API-Football: {data.get('errors')}")
+                    logging.error(f"Ошибка самого API-Football: {data.get('errors')}")
                     return []
                 all_fixtures = data.get("response", [])
                 filtered_matches = []
@@ -143,7 +148,7 @@ async def fetch_matches_from_api(date_str: str):
                         })
                 return filtered_matches
         except Exception as e:
-            logging.error(f"Критическая ошибка сети при JavaScript API: {e}")
+            logging.error(f"Критическая ошибка сети при запросе API: {e}")
             return []
 
 async def sync_three_days_matches():
