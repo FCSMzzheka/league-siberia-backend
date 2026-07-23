@@ -141,12 +141,14 @@ async def fetch_europe_matches(date_str: str):
                             "home_team": m["homeTeam"]["name"], "away_team": m["awayTeam"]["name"], "result": score
                         })
                 return result
-        except: return []
+        except Exception as e:
+            logging.error(f"Ошибка Европы: {e}")
+            return []
 
 async def fetch_rpl_matches():
     """Качает РПЛ через открытый и стабильный мобильный JSON-канал Sports.ru"""
     url = "https://sports.ru"
-    params = {"subdivision_id": 235} # 235 — ID РПЛ в системе Sports.ru
+    params = {"subdivision_id": 235}
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, params=params, timeout=15) as response:
@@ -154,27 +156,27 @@ async def fetch_rpl_matches():
                 if response.status != 200: return []
                 data = await response.json()
                 result = []
-                # Ищем матчи в структуре JSON
                 for day in data.get("days", []):
                     for m in day.get("matches", []):
-                        score = f"{m.get('goals_home')}:{m.get('goals('away')')}" if m.get("status") == "finished" else None
+                        # ИСПРАВИЛ ОШИБКУ ТУТ: кавычки теперь расставлены верно!
+                        score = f"{m.get('goals_home')}:{m.get('goals_away')}" if m.get("status") == "finished" else None
                         result.append({
                             "match_id": m["id"], "league_id": 235, "date": m["date"],
                             "home_team": m["home_team"]["name"], "away_team": m["away_team"]["name"], "result": score
                         })
                 return result
-        except: return []
+        except Exception as e:
+            logging.error(f"Ошибка РПЛ: {e}")
+            return []
 
 async def sync_three_days_matches():
     """Фоновое наполнение SQLite данными из обоих бесплатных источников"""
-    # 1. Забираем РПЛ
     rpl = await fetch_rpl_matches()
     async with aiosqlite.connect(DB_NAME) as db:
         for m in rpl:
             await db.execute('INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"]))
         await db.commit()
     
-    # 2. Забираем Европу на 3 дня вперед
     now = datetime.now(timezone.utc)
     for i in range(3):
         date_str = (now + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -192,9 +194,7 @@ async def check_live_results_and_notify():
         async with db.execute("SELECT match_id FROM matches WHERE result IS NULL") as cursor:
             if not await cursor.fetchall(): return
             
-        # Обновляем Европу
         euro = await fetch_europe_matches(now.strftime("%Y-%m-%d"))
-        # Обновляем РПЛ
         rpl = await fetch_rpl_matches()
         
         all_live = euro + rpl
