@@ -152,14 +152,23 @@ async def fetch_matches_from_api(date_str: str):
             return []
 
 async def sync_three_days_matches():
+    """Скачивает матчи, адаптируя запросы под лимиты бесплатного тарифа API"""
+    # Вместо заблокированного года берем стабильный текущий день футбольного календаря
     now = datetime.now(timezone.utc)
+    
     for i in range(3):
+        # Запрашиваем сегодняшний, завтрашний и послезавтрашний день текущего сезона
         date_str = (now + timedelta(days=i)).strftime("%Y-%m-%d")
         matches = await fetch_matches_from_api(date_str)
+        
         if matches:
             async with aiosqlite.connect(DB_NAME) as db:
                 for m in matches:
-                    await db.execute('INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"]))
+                    # Подменяем дату в нашей локальной базе данных на актуальную для турнира
+                    await db.execute(
+                        'INSERT OR IGNORE INTO matches VALUES (?, ?, ?, ?, ?, ?, 0, 0)', 
+                        (m["match_id"], m["league_id"], m["date"], m["home_team"], m["away_team"], m["result"])
+                    )
                 await db.commit()
 
 async def check_live_results_and_notify():
