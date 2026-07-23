@@ -64,7 +64,6 @@ async def cmd_start(message: types.Message):
     
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
-        # По умолчанию автоматически подключаем пользователя ко всем доступным лигам
         for l_id in LEAGUE_IDS:
             await db.execute("INSERT OR IGNORE INTO user_leagues (user_id, league_id, points) VALUES (?, ?, 0)", (user_id, l_id))
         await db.commit()
@@ -75,7 +74,7 @@ async def cmd_start(message: types.Message):
         web_app=types.WebAppInfo(url=WEB_APP_URL)
     )
     
-        text = (
+    text = (
         "📊 *АНАЛИТИЧЕСКАЯ СИСТЕМА ПРОГНОЗИРОВАНИЯ*\n\n"
         f"Учетная запись *@{escape_md(username)}* успешно активирована\.\n\n"
         "Используйте кнопку ниже, чтобы открыть графический интерфейс, "
