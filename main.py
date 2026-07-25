@@ -2,9 +2,10 @@ import asyncio
 import logging
 import json
 import re
-import urllib.parse
 import os
 import aiosqlite
+import aiohttp
+from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -13,6 +14,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEB_APP_URL = "https://fcsmzzheka.github.io/LeagueOfSiberia/"
 DB_NAME = "football_predict_bot.db"
+
 
 LEAGUES_DICT = {
     235: "Российская Премьер-Лига",
@@ -23,6 +25,16 @@ LEAGUES_DICT = {
     2: "Лига Чемпионов УЕФА"
 }
 LEAGUE_IDS = list(LEAGUES_DICT.keys())
+
+# Неизменяемые вечные ссылки на результаты Sport.ru для всех 6 лиг
+SPORT_RU_URLS = {
+    235: "https://www.sport.ru/football/rfpl/results/",
+    39: "https://www.sport.ru/football/premer-liga_angliya/results/",
+    140: "https://www.sport.ru/football/primera_ispaniya/results/",
+    135: "https://www.sport.ru/football/seriya_a_italiya/results/",
+    78: "https://www.sport.ru/football/bundesliga_germaniya/results/",
+    2: "https://www.sport.ru/football/liga_chempionov_uefa/results/"
+}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -56,11 +68,10 @@ async def cmd_start(message: types.Message):
         await db.commit()
         
     builder = InlineKeyboardBuilder()
-    # Ссылка стала чистой, легкой и моментальной для Telegram
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=WEB_APP_URL))
     
     text = (
-        "<b>📊 КОНКУРС ПРОГНОЗОВ</b>\n\n"
+        "<b>📊 АНАЛИТИЧЕСКАЯ СИСТЕМА ПРОГНОЗИРОВАНИЯ</b>\n\n"
         f"Учетная запись <b>@{username}</b> успешно активирована.\n\n"
         "Нажмите на кнопку ниже, чтобы открыть графический матч-центр:"
     )
@@ -71,7 +82,6 @@ async def process_web_app_data(message: types.Message):
     try:
         data = json.loads(message.web_app_data.data)
         
-        # Перенесли сбор и отдачу JSON-данных в безопасный фоновый поток по запросу от приложения
         if data.get("action") == "load_data":
             async with aiosqlite.connect(DB_NAME) as db:
                 query_matches = "SELECT match_id, league_id, date, home_team, away_team FROM matches WHERE result IS NULL ORDER BY date ASC"
@@ -111,9 +121,54 @@ async def process_web_app_data(message: types.Message):
     except Exception as e:
         logging.error(f"Ошибка Web App: {e}")
 
+async def sync_sport_ru():
+    """Фоновый парсер открытых HTML-таблиц результатов и календаря Sport.ru"""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        for league_id, url in SPORT_RU_URLS.items():
+            try:
+                async with session.get(url, timeout=15) as response:
+                    if response.status != 200: continue
+                    html = await response.text()
+                    soup = BeautifulSoup(html, "html.parser")
+                    
+                    # Ищем строки таблиц с матчами на Sport.ru
+                    rows = soup.find_all("tr")
+                    async with aiosqlite.connect(DB_NAME) as db:
+                        for row in rows:
+                            cols = row.find_all("td")
+                            # Классическая строка матча содержит: дата/время, команда1, счет/время, команда2
+                            if len(cols) >= 4:
+                                date_str = cols[0].get_text(strip=True)
+                                team1 = cols[1].get_text(strip=True)
+                                status_or_score = cols[2].get_text(strip=True)
+                                team2 = cols[3].get_text(strip=True)
+                                
+                                # Если в ячейке счета стоит время (например "19:00" или "—"), значит матч предстоящий
+                                if ":" in status_or_score and len(status_or_score) <= 5 or status_or_score == "—":
+                                    match_id = abs(hash(team1 + team2 + date_str)) % 1000000
+                                    full_date = f"{date_str} {status_or_score}"
+                                    
+                                    await db.execute(
+                                        'INSERT OR IGNORE INTO matches (match_id, league_id, date, home_team, away_team, result) VALUES (?, ?, ?, ?, ?, NULL)',
+                                        (match_id, league_id, full_date, team1, team2)
+                                    )
+                        await db.commit()
+                logging.info(f"Лига {league_id} успешно спарсена со Sport.ru")
+            except Exception as e:
+                logging.error(f"Ошибка парсинга лиги {league_id}: {e}")
+
+async def scheduler_loop():
+    """Каждые 4 часа бот заходит на Sport.ru и забирает свежее расписание лиг"""
+    while True:
+        await sync_sport_ru()
+        await asyncio.sleep(14400)
+
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
+    # Запускаем автоматическое чтение таблиц в фоновом режиме
+    asyncio.create_task(scheduler_loop())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
