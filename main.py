@@ -4,6 +4,7 @@ import json
 import re
 import os
 import urllib.parse
+from datetime import datetime
 import aiosqlite
 import aiohttp
 from bs4 import BeautifulSoup
@@ -27,12 +28,12 @@ LEAGUES_DICT = {
 LEAGUE_IDS = list(LEAGUES_DICT.keys())
 
 SPORT_RU_URLS = {
-    235: "https://sport.ru",
-    39: "https://sport.ru",
-    140: "https://sport.ru",
-    135: "https://sport.ru",
-    78: "https://sport.ru",
-    2: "https://sport.ru"
+    235: "https://www.sport.ru/football/rfpl/results/",
+    39: "https://www.sport.ru/football/premer-liga_angliya/results/",
+    140: "https://www.sport.ru/football/primera_ispaniya/results/",
+    135: "https://www.sport.ru/football/seriya_a_italiya/results/",
+    78: "https://www.sport.ru/football/bundesliga_germaniya/results/",
+    2: "https://www.sport.ru/football/liga_chempionov_uefa/results/"
 }
 
 bot = Bot(token=BOT_TOKEN)
@@ -66,12 +67,11 @@ async def cmd_start(message: types.Message):
             await db.execute("INSERT OR IGNORE INTO user_leagues (user_id, league_id, points) VALUES (?, ?, 0)", (user_id, l_id))
         await db.commit()
         
-        # Вытаскиваем строго БЛИЖАЙШИЕ 8 МАТЧЕЙ, которые еще не сыграны
-        query_matches = "SELECT match_id, league_id, date, home_team, away_team FROM matches WHERE result IS NULL ORDER BY date ASC LIMIT 8"
+        query_matches = "SELECT match_id, league_id, date, home_team, away_team FROM matches WHERE result IS NULL"
         async with db.execute(query_matches) as cursor:
             matches_rows = await cursor.fetchall()
 
-        matches_list = []
+    matches_list = []
     for r in matches_rows:
         matches_list.append({
             "id": r[0], 
@@ -81,7 +81,6 @@ async def cmd_start(message: types.Message):
             "away": r[4]
         })
 
-    # Упаковываем этот легкий архив в ссылку кнопки
     init_data = {"matches": matches_list}
     encoded_data = urllib.parse.urlencode({"data": json.dumps(init_data)})
     final_url = f"{WEB_APP_URL}?{encoded_data}"
@@ -90,7 +89,7 @@ async def cmd_start(message: types.Message):
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=final_url))
     
     text = (
-        "<b>📊 КОНКУРС ПРОГНОЗОВ</b>\n\n"
+        "<b>📊 АНАЛИТИЧЕСКАЯ СИСТЕМА ПРОГНОЗИРОВАНИЯ</b>\n\n"
         f"Учетная запись <b>@{username}</b> успешно активирована.\n\n"
         "Нажмите на кнопку ниже, чтобы открыть графический матч-центр:"
     )
@@ -116,6 +115,8 @@ async def process_web_app_data(message: types.Message):
 
 async def sync_sport_ru():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    now = datetime.now() # Текущее время сервера Amvera
+    
     async with aiohttp.ClientSession(headers=headers) as session:
         for league_id, url in SPORT_RU_URLS.items():
             try:
@@ -123,26 +124,37 @@ async def sync_sport_ru():
                     if response.status != 200: continue
                     html = await response.text()
                     soup = BeautifulSoup(html, "html.parser")
-                    
                     rows = soup.find_all("tr")
+                    
                     async with aiosqlite.connect(DB_NAME) as db:
                         for row in rows:
                             cols = row.find_all("td")
-                            if len(cols) >= 4:
-                                date_str = cols[0].get_text(strip=True)
-                                team1 = cols[1].get_text(strip=True)
-                                status_or_score = cols[2].get_text(strip=True)
-                                team2 = cols[3].get_text(strip=True)
+                            if len(cols) == 3:
+                                col_left = cols[0].get_text(strip=True)
+                                team2 = cols[2].get_text(strip=True)
                                 
-                                # Отсекаем только будущие игры, где вместо счета стоит время
-                                if ":" in status_or_score and len(status_or_score) <= 5 or status_or_score == "—":
-                                    match_id = abs(hash(team1 + team2 + date_str)) % 1000000
-                                    full_date = f"{date_str} {status_or_score}"
+                                # Железно вытаскиваем дату из первой колонки
+                                match_date = re.search(r'^(\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2})', col_left)
+                                if match_date:
+                                    date_str = match_date.group(1) # Строка вида "25.07.2026 14:00"
                                     
-                                    await db.execute(
-                                        'INSERT OR IGNORE INTO matches (match_id, league_id, date, home_team, away_team, result) VALUES (?, ?, ?, ?, ?, NULL)',
-                                        (match_id, league_id, full_date, team1, team2)
-                                    )
+                                    try:
+                                        # Переводим текст в реальное системное время
+                                        match_dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
+                                        
+                                        # ПРИВЯЗКА КО ВРЕМЕНИ: Если матч еще будет в будущем — сохраняем!
+                                        if match_dt > now:
+                                            clean_left = col_left.replace(date_str, "").replace("MSK", "").strip()
+                                            team1 = re.sub(r'^\d+\s+', '', clean_left).strip()
+                                            
+                                            match_id = abs(hash(team1 + team2 + date_str)) % 1000000
+                                            
+                                            await db.execute(
+                                                'INSERT OR IGNORE INTO matches (match_id, league_id, date, home_team, away_team, result) VALUES (?, ?, ?, ?, ?, NULL)',
+                                                (match_id, league_id, date_str, team1, team2)
+                                            )
+                                    except Exception as parse_err:
+                                        logging.error(f"Ошибка даты: {parse_err}")
                         await db.commit()
                 logging.info(f"Лига {league_id} успешно спарсена со Sport.ru")
             except Exception as e:
