@@ -14,7 +14,6 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEB_APP_URL = "https://fcsmzzheka.github.io/LeagueOfSiberia/"
 DB_NAME = "football_predict_bot.db"
 
-
 LEAGUES_DICT = {
     235: "Российская Премьер-Лига",
     39: "Английская Премьер-Лига",
@@ -50,22 +49,20 @@ async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     username = message.from_user.username or f"id{user_id}"
     
-    try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
-            for l_id in LEAGUE_IDS:
-                await db.execute("INSERT OR IGNORE INTO user_leagues (user_id, league_id, points) VALUES (?, ?, 0)", (user_id, l_id))
-            await db.commit()
-    except Exception as e:
-        logging.error(f"Регистрация пользователя в БД: {e}")
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
+        for l_id in LEAGUE_IDS:
+            await db.execute("INSERT OR IGNORE INTO user_leagues (user_id, league_id, points) VALUES (?, ?, 0)", (user_id, l_id))
+        await db.commit()
         
     builder = InlineKeyboardBuilder()
+    # Ссылка стала чистой, легкой и моментальной для Telegram
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=WEB_APP_URL))
     
     text = (
-        "<b>📊 АНАЛИТИЧЕСКАЯ СИСТЕМА ПРОГНОЗИРОВАНИЯ</b>\n\n"
+        "<b>📊 КОНКУРС ПРОГНОЗОВ</b>\n\n"
         f"Учетная запись <b>@{username}</b> успешно активирована.\n\n"
-        "Нажмите на кнопку ниже, чтобы открыть графический матч-центр турнира:"
+        "Нажмите на кнопку ниже, чтобы открыть графический матч-центр:"
     )
     await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
@@ -73,33 +70,51 @@ async def cmd_start(message: types.Message):
 async def process_web_app_data(message: types.Message):
     try:
         data = json.loads(message.web_app_data.data)
-        if data.get("action") == "predict":
+        
+        # Перенесли сбор и отдачу JSON-данных в безопасный фоновый поток по запросу от приложения
+        if data.get("action") == "load_data":
+            async with aiosqlite.connect(DB_NAME) as db:
+                query_matches = "SELECT match_id, league_id, date, home_team, away_team FROM matches WHERE result IS NULL ORDER BY date ASC"
+                async with db.execute(query_matches) as cursor:
+                    matches_rows = await cursor.fetchall()
+                    
+                query_leaders = """
+                    SELECT ul.league_id, u.username, ul.points FROM user_leagues ul 
+                    JOIN users u ON ul.user_id = u.user_id ORDER BY ul.league_id, ul.points DESC
+                """
+                async with db.execute(query_leaders) as cursor:
+                    leaders_rows = await cursor.fetchall()
+
+            matches_list = []
+            for r in matches_rows:
+                matches_list.append({"id": r[0], "league": LEAGUES_DICT.get(r[1], "Турнир"), "date": r[2], "home": r[3], "away": r[4]})
+                
+            leaders_dict = {l_id: [] for l_id in LEAGUE_IDS}
+            for l_id, u_name, pts in leaders_rows:
+                if l_id in leaders_dict and len(leaders_dict[l_id]) < 10:
+                    leaders_dict[l_id].append({"username": u_name, "points": pts})
+
+            init_data = {"matches": matches_list, "leaderboards": leaders_dict, "leagues": LEAGUES_DICT}
+            await message.answer(f"DATA_FEED:{json.dumps(init_data)}")
+            
+        elif data.get("action") == "predict":
             match_id = int(data.get("match_id"))
             score = data.get("score")
-            home_team = data.get("home")
-            away_team = data.get("away")
             user_id = message.from_user.id
-            
             async with aiosqlite.connect(DB_NAME) as db:
-                await db.execute('INSERT OR IGNORE INTO matches VALUES (?, 235, "2026-07-25", ?, ?, NULL, 0, 0)', (match_id, home_team, away_team))
-                await db.execute('INSERT OR REPLACE INTO predictions VALUES (?, ?, ?)', (user_id, match_id, score))
-                await db.commit()
-                
-            await message.answer(
-                f"✅ <b>Прогноз внесен в реестр</b>\n\n"
-                f"⚔️ {escape_md(home_team)} — {escape_md(away_team)}\n"
-                f"🔮 Ставка: <code>{score}</code>", 
-                parse_mode="HTML"
-            )
+                async with db.execute("SELECT home_team, away_team FROM matches WHERE match_id = ?", (match_id,)) as cursor:
+                    match = await cursor.fetchone()
+                if match:
+                    await db.execute('INSERT OR REPLACE INTO predictions VALUES (?, ?, ?)', (user_id, match_id, score))
+                    await db.commit()
+                    await message.answer(f"✅ <b>Прогноз внесен в реестр</b>\n\n⚔️ {escape_md(match[0])} — {escape_md(match[1])}\n🔮 Ставка: <code>{score}</code>", parse_mode="HTML")
     except Exception as e:
         logging.error(f"Ошибка Web App: {e}")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
-    logging.info("Бот успешно запущен в сеть!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try: asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit): pass
+    asyncio.run(main())
