@@ -82,7 +82,7 @@ async def cmd_start(message: types.Message):
         })
 
     init_data = {"matches": matches_list}
-    json_string = json.dumps(init_data, separators=(',', ':'))
+    json_string = json.dumps(init_data, separators=(',', ':'), ensure_ascii=False)
     encoded_data = urllib.parse.quote(json_string)
     final_url = f"{WEB_APP_URL}?v={int(datetime.now().timestamp())}&data={encoded_data}"
         
