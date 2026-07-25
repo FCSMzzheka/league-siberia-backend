@@ -3,7 +3,6 @@ import logging
 import json
 import re
 import os
-import urllib.parse
 from datetime import datetime
 import aiosqlite
 import aiohttp
@@ -11,6 +10,11 @@ from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+# FASTAPI ИМПОРТЫ
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
 # --- НАСТРОЙКИ СИСТЕМЫ ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -35,6 +39,34 @@ SPORT_RU_URLS = {
     78: "https://www.sport.ru/football/bundesliga_germaniya/results/",
     2: "https://www.sport.ru/football/liga_chempionov_uefa/results/"
 }
+
+# --- FASTAPI СЕРВЕР ---
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+@app.get("/matches")
+async def get_matches():
+    async with aiosqlite.connect(DB_NAME) as db:
+        query_matches = "SELECT match_id, league_id, date, home_team, away_team FROM matches WHERE result IS NULL"
+        async with db.execute(query_matches) as cursor:
+            rows = await cursor.fetchall()
+            
+    matches_list = []
+    for r in rows:
+        matches_list.append({
+            "id": r[0], 
+            "league": LEAGUES_DICT.get(r[1], "Турнир"), 
+            "date": r[2], 
+            "home": r[3], 
+            "away": r[4]
+        })
+    return {"matches": matches_list}
+
+async def run_server():
+    config = uvicorn.Config(app, host="0.0.0.0", port=8080)
+    server = uvicorn.Server(config)
+    await server.serve()
+# -----------------------
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -67,24 +99,7 @@ async def cmd_start(message: types.Message):
             await db.execute("INSERT OR IGNORE INTO user_leagues (user_id, league_id, points) VALUES (?, ?, 0)", (user_id, l_id))
         await db.commit()
         
-        query_matches = "SELECT match_id, league_id, date, home_team, away_team FROM matches WHERE result IS NULL"
-        async with db.execute(query_matches) as cursor:
-            matches_rows = await cursor.fetchall()
-
-    matches_list = []
-    for r in matches_rows:
-        matches_list.append({
-            "id": r[0], 
-            "league": LEAGUES_DICT.get(r[1], "Турнир"), 
-            "date": r[2], 
-            "home": r[3], 
-            "away": r[4]
-        })
-
-    init_data = {"matches": matches_list}
-    json_string = json.dumps(init_data, separators=(',', ':'), ensure_ascii=False)
-    encoded_data = urllib.parse.quote(json_string)
-    final_url = f"{WEB_APP_URL}?v={int(datetime.now().timestamp())}&data={encoded_data}"
+    final_url = f"{WEB_APP_URL}?v={int(datetime.now().timestamp())}"
         
     builder = InlineKeyboardBuilder()
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=final_url))
@@ -121,30 +136,24 @@ async def sync_sport_ru():
     async with aiohttp.ClientSession(headers=headers) as session:
         for league_id, url in SPORT_RU_URLS.items():
             try:
-                # ЭТАП 1: Получаем основную страницу и ищем ссылку на iframe
                 async with session.get(url, timeout=15) as response:
                     if response.status != 200: continue
                     html = await response.text(encoding='cp1251', errors='ignore')
                     soup = BeautifulSoup(html, "html.parser")
                     
                     iframe = soup.find("iframe", id="myFrame")
-                    if not iframe:
-                        logging.error(f"Не найден iframe на странице лиги {league_id}")
-                        continue
+                    if not iframe: continue
                         
                     iframe_src = iframe.get("src")
                     iframe_url = f"https://www.sport.ru{iframe_src}"
                 
-                # ЭТАП 2: Скачиваем таблицу из iframe и парсим её
                 async with session.get(iframe_url, timeout=15) as iframe_response:
                     if iframe_response.status != 200: continue
                     iframe_html = await iframe_response.text(encoding='cp1251', errors='ignore')
                     iframe_soup = BeautifulSoup(iframe_html, "html.parser")
                     
-                    # Ищем таблицу с классом matches
                     matches_table = iframe_soup.find("table", class_="matches")
-                    if not matches_table:
-                        continue
+                    if not matches_table: continue
                         
                     rows = matches_table.find_all("tr")
                     added_count = 0
@@ -152,44 +161,31 @@ async def sync_sport_ru():
                     async with aiosqlite.connect(DB_NAME) as db:
                         for row in rows:
                             cols = row.find_all("td")
-                            
-                            # Если колонок мало, это строка-заголовок, пропускаем
-                            if len(cols) < 5:
-                                continue
+                            if len(cols) < 5: continue
                                 
-                            # Ищем команды по специальному классу ссылок
                             teams = row.find_all("a", class_="team-link")
                             if len(teams) >= 2:
                                 team1 = teams[0].get_text(strip=True)
                                 team2 = teams[1].get_text(strip=True)
-                                
-                                # Достаем текст из первой колонки и ищем дату
                                 date_text = cols[0].get_text(separator=" ", strip=True)
                                 match_date = re.search(r'(\d{2}\.\d{2}\.\d{4})\s*(\d{2}:\d{2})', date_text)
                                 
                                 if match_date:
                                     date_str = f"{match_date.group(1)} {match_date.group(2)}"
-                                    
                                     try:
                                         match_dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
-                                        
-                                        # Сохраняем только будущие матчи
                                         if match_dt > now:
                                             match_id = abs(hash(team1 + team2 + date_str)) % 1000000
-                                            
                                             await db.execute(
                                                 'INSERT OR IGNORE INTO matches (match_id, league_id, date, home_team, away_team, result) VALUES (?, ?, ?, ?, ?, NULL)',
                                                 (match_id, league_id, date_str, team1, team2)
                                             )
                                             added_count += 1
-                                    except Exception as parse_err:
-                                        logging.error(f"Ошибка парсинга даты: {parse_err}")
+                                    except: continue
                         await db.commit()
-                
-                logging.info(f"Лига {league_id} успешно спарсена. Найдено будущих матчей: {added_count}")
-                
+                logging.info(f"Лига {league_id} успешно спарсена.")
             except Exception as e:
-                logging.error(f"Глобальная ошибка парсинга лиги {league_id}: {e}")
+                logging.error(f"Ошибка парсинга лиги {league_id}: {e}")
 
 async def scheduler_loop():
     while True:
@@ -200,6 +196,7 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
     asyncio.create_task(scheduler_loop())
+    asyncio.create_task(run_server()) # Запуск API
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
