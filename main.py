@@ -71,9 +71,15 @@ async def cmd_start(message: types.Message):
         async with db.execute(query_matches) as cursor:
             matches_rows = await cursor.fetchall()
 
-    matches_list = []
+        matches_list = []
     for r in matches_rows:
-        matches_list.append({"id": r[0], "league": LEAGUES_DICT.get(r[1], "Турнир"), "date": r[2], "home": r[3], "away": r[4]})
+        matches_list.append({
+            "id": r[0], 
+            "league": LEAGUES_DICT.get(r[1], "Турнир"), 
+            "date": r[2], 
+            "home": r[3], 
+            "away": r[4]
+        })
 
     # Упаковываем этот легкий архив в ссылку кнопки
     init_data = {"matches": matches_list}
