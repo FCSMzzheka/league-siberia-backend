@@ -124,7 +124,7 @@ async def sync_sport_ru():
                 # ЭТАП 1: Получаем основную страницу и ищем ссылку на iframe
                 async with session.get(url, timeout=15) as response:
                     if response.status != 200: continue
-                    html = await response.text(encoding='utf-8')
+                    html = await response.text(encoding='cp1251')
                     soup = BeautifulSoup(html, "html.parser")
                     
                     iframe = soup.find("iframe", id="myFrame")
@@ -138,7 +138,7 @@ async def sync_sport_ru():
                 # ЭТАП 2: Скачиваем таблицу из iframe и парсим её
                 async with session.get(iframe_url, timeout=15) as iframe_response:
                     if iframe_response.status != 200: continue
-                    iframe_html = await iframe_response.text(encoding='utf-8')
+                    iframe_html = await iframe_response.text(encoding='cp1251')
                     iframe_soup = BeautifulSoup(iframe_html, "html.parser")
                     
                     # Ищем таблицу с классом matches
