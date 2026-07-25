@@ -84,7 +84,7 @@ async def cmd_start(message: types.Message):
     init_data = {"matches": matches_list}
     json_string = json.dumps(init_data, separators=(',', ':'))
     encoded_data = urllib.parse.quote(json_string)
-    final_url = f"{WEB_APP_URL}?data={encoded_data}"
+    final_url = f"{WEB_APP_URL}?v={int(datetime.now().timestamp())}&data={encoded_data}"
         
     builder = InlineKeyboardBuilder()
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=final_url))
