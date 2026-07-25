@@ -1,6 +1,4 @@
 aiogram
-apscheduler
 aiosqlite
 aiohttp
 beautifulsoup4
-cloudscraper
