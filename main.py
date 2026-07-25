@@ -69,7 +69,8 @@ async def get_matches():
     return {"matches": matches_list}
 
 async def run_server():
-    config = uvicorn.Config(app, host="0.0.0.0", port=8080)
+    port = int(os.getenv("PORT", 8080))
+    config = uvicorn.Config(app, host="0.0.0.0", port=port)
     server = uvicorn.Server(config)
     await server.serve()
 # -----------------------
