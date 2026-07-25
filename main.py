@@ -82,8 +82,9 @@ async def cmd_start(message: types.Message):
         })
 
     init_data = {"matches": matches_list}
-    encoded_data = urllib.parse.urlencode({"data": json.dumps(init_data)})
-    final_url = f"{WEB_APP_URL}?{encoded_data}"
+    json_string = json.dumps(init_data, separators=(',', ':'))
+    encoded_data = urllib.parse.quote(json_string)
+    final_url = f"{WEB_APP_URL}?data={encoded_data}"
         
     builder = InlineKeyboardBuilder()
     builder.button(text="ОТКРЫТЬ МАТЧ-ЦЕНТР 📱", web_app=types.WebAppInfo(url=final_url))
@@ -115,50 +116,80 @@ async def process_web_app_data(message: types.Message):
 
 async def sync_sport_ru():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    now = datetime.now() # Текущее время сервера Amvera
+    now = datetime.now()
     
     async with aiohttp.ClientSession(headers=headers) as session:
         for league_id, url in SPORT_RU_URLS.items():
             try:
+                # ЭТАП 1: Получаем основную страницу и ищем ссылку на iframe
                 async with session.get(url, timeout=15) as response:
                     if response.status != 200: continue
                     html = await response.text()
                     soup = BeautifulSoup(html, "html.parser")
-                    rows = soup.find_all("tr")
+                    
+                    iframe = soup.find("iframe", id="myFrame")
+                    if not iframe:
+                        logging.error(f"Не найден iframe на странице лиги {league_id}")
+                        continue
+                        
+                    iframe_src = iframe.get("src")
+                    iframe_url = f"https://www.sport.ru{iframe_src}"
+                
+                # ЭТАП 2: Скачиваем таблицу из iframe и парсим её
+                async with session.get(iframe_url, timeout=15) as iframe_response:
+                    if iframe_response.status != 200: continue
+                    iframe_html = await iframe_response.text()
+                    iframe_soup = BeautifulSoup(iframe_html, "html.parser")
+                    
+                    # Ищем таблицу с классом matches
+                    matches_table = iframe_soup.find("table", class_="matches")
+                    if not matches_table:
+                        continue
+                        
+                    rows = matches_table.find_all("tr")
+                    added_count = 0
                     
                     async with aiosqlite.connect(DB_NAME) as db:
                         for row in rows:
                             cols = row.find_all("td")
-                            if len(cols) == 3:
-                                col_left = cols[0].get_text(strip=True)
-                                team2 = cols[2].get_text(strip=True)
+                            
+                            # Если колонок мало, это строка-заголовок, пропускаем
+                            if len(cols) < 5:
+                                continue
                                 
-                                # Железно вытаскиваем дату из первой колонки
-                                match_date = re.search(r'^(\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2})', col_left)
+                            # Ищем команды по специальному классу ссылок
+                            teams = row.find_all("a", class_="team-link")
+                            if len(teams) >= 2:
+                                team1 = teams[0].get_text(strip=True)
+                                team2 = teams[1].get_text(strip=True)
+                                
+                                # Достаем текст из первой колонки и ищем дату
+                                date_text = cols[0].get_text(separator=" ", strip=True)
+                                match_date = re.search(r'(\d{2}\.\d{2}\.\d{4})\s*(\d{2}:\d{2})', date_text)
+                                
                                 if match_date:
-                                    date_str = match_date.group(1) # Строка вида "25.07.2026 14:00"
+                                    date_str = f"{match_date.group(1)} {match_date.group(2)}"
                                     
                                     try:
-                                        # Переводим текст в реальное системное время
                                         match_dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
                                         
-                                        # ПРИВЯЗКА КО ВРЕМЕНИ: Если матч еще будет в будущем — сохраняем!
+                                        # Сохраняем только будущие матчи
                                         if match_dt > now:
-                                            clean_left = col_left.replace(date_str, "").replace("MSK", "").strip()
-                                            team1 = re.sub(r'^\d+\s+', '', clean_left).strip()
-                                            
                                             match_id = abs(hash(team1 + team2 + date_str)) % 1000000
                                             
                                             await db.execute(
                                                 'INSERT OR IGNORE INTO matches (match_id, league_id, date, home_team, away_team, result) VALUES (?, ?, ?, ?, ?, NULL)',
                                                 (match_id, league_id, date_str, team1, team2)
                                             )
+                                            added_count += 1
                                     except Exception as parse_err:
-                                        logging.error(f"Ошибка даты: {parse_err}")
+                                        logging.error(f"Ошибка парсинга даты: {parse_err}")
                         await db.commit()
-                logging.info(f"Лига {league_id} успешно спарсена со Sport.ru")
+                
+                logging.info(f"Лига {league_id} успешно спарсена. Найдено будущих матчей: {added_count}")
+                
             except Exception as e:
-                logging.error(f"Ошибка парсинга лиги {league_id}: {e}")
+                logging.error(f"Глобальная ошибка парсинга лиги {league_id}: {e}")
 
 async def scheduler_loop():
     while True:
